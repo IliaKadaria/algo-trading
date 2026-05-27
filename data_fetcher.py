@@ -11,7 +11,11 @@ def fetch(ticker: str, start: str = BACKTEST_START, end: str = BACKTEST_END) -> 
     if raw.empty:
         raise ValueError(f"No data returned for {ticker}")
     df = raw.copy()
-    df.columns = [c.lower() for c in df.columns]
+    # yfinance >= 1.0 returns a MultiIndex (PriceType, Ticker) — flatten to single level
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [price.lower() for price, _tick in df.columns]
+    else:
+        df.columns = [c.lower() for c in df.columns]
     df.index = pd.to_datetime(df.index)
     df.dropna(inplace=True)
     return df
