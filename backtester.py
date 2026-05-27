@@ -54,8 +54,7 @@ def _simulate_ticker(ticker: str, capital_share: float) -> tuple[pd.Series, list
     sig = combined_signal(df, STRATEGY_WEIGHTS)
 
     cash     = capital_share
-    position = 0        # shares held (+/-)
-    direction = 0
+    position = 0        # shares held (long-only, always >= 0)
     entry_px  = 0.0
     stop_px   = 0.0
     best_px   = 0.0
@@ -68,47 +67,45 @@ def _simulate_ticker(ticker: str, capital_share: float) -> tuple[pd.Series, list
         price = row["close"]
         atr   = row["atr"]
 
-        # ── manage open position ───────────────────────────────────────────────
-        if position != 0:
-            best_px = max(best_px, price) if direction == 1 else min(best_px, price)
-            trail   = trailing_stop(entry_px, direction, best_px, atr)
-            stop_px = max(stop_px, trail) if direction == 1 else min(stop_px, trail)
+        # ── manage open long position ──────────────────────────────────────────
+        if position > 0:
+            best_px = max(best_px, price)
+            trail   = trailing_stop(entry_px, 1, best_px, atr)
+            stop_px = max(stop_px, trail)          # ratchet stop up only
 
-            hit_stop = (direction == 1 and price <= stop_px) or \
-                       (direction == -1 and price >= stop_px)
-            reverse  = (sig.iloc[i] != 0) and (sig.iloc[i] != direction)
-            should_exit = hit_stop or reverse
+            hit_stop   = price <= stop_px
+            strat_exit = sig.iloc[i] == 0          # strategy says flat
+            should_exit = hit_stop or strat_exit
 
             if should_exit:
                 exit_px = stop_px if hit_stop else price
-                gross   = position * exit_px * direction
-                fee     = abs(position) * exit_px * COMMISSION
+                gross   = position * exit_px
+                fee     = position * exit_px * COMMISSION
                 cash   += gross - fee
                 if current_trade:
                     current_trade.exit_date  = date
                     current_trade.exit_price = exit_px
-                    current_trade.pnl        = gross - fee - abs(position) * entry_px * COMMISSION
+                    current_trade.pnl        = (exit_px - entry_px) * position - \
+                                               position * (entry_px + exit_px) * COMMISSION
                     trades.append(current_trade)
                     current_trade = None
-                position  = 0
-                direction = 0
+                position = 0
 
-        # ── open new position ──────────────────────────────────────────────────
-        if position == 0 and sig.iloc[i] != 0:
-            direction = sig.iloc[i]
-            entry_px  = price
-            shares    = position_size(cash, price, atr)
-            cost      = shares * price * COMMISSION
-            if shares > 0 and cash >= shares * price + cost:
-                position  = shares * direction
-                cash     -= shares * price + cost
-                stop_px   = stop_price(entry_px, direction, atr)
+        # ── open new long position ─────────────────────────────────────────────
+        if position == 0 and sig.iloc[i] == 1:
+            entry_px = price
+            shares   = position_size(cash, price, atr)
+            cost     = shares * price * (1 + COMMISSION)
+            if shares > 0 and cash >= cost:
+                position  = shares
+                cash     -= cost
+                stop_px   = stop_price(entry_px, 1, atr)
                 best_px   = price
                 current_trade = Trade(
                     ticker=ticker,
                     entry_date=date,
                     entry_price=entry_px,
-                    direction=direction,
+                    direction=1,
                     shares=shares,
                     stop=stop_px,
                 )
@@ -119,12 +116,12 @@ def _simulate_ticker(ticker: str, capital_share: float) -> tuple[pd.Series, list
     # close any open position at end
     if position != 0 and current_trade:
         last_price = df["close"].iloc[-1]
-        gross = position * last_price * direction
-        fee   = abs(position) * last_price * COMMISSION
-        cash += gross - fee
+        fee  = position * last_price * COMMISSION
+        cash += position * last_price - fee
         current_trade.exit_date  = df.index[-1]
         current_trade.exit_price = last_price
-        current_trade.pnl        = gross - fee - abs(position) * entry_px * COMMISSION
+        current_trade.pnl        = (last_price - entry_px) * position - \
+                                    position * (entry_px + last_price) * COMMISSION
         trades.append(current_trade)
 
     return equity, trades
